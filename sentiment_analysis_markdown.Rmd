@@ -1,0 +1,171 @@
+---
+Author: Ayoub Rmidi
+title: "Sentiment Analysis over Moroccan politcal content based on Hespress comments"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tm)
+library(e1071)
+library(caret)
+# Library for parallel processing
+library(doMC)
+registerDoMC(cores=detectCores())  # Use all available cores
+```
+
+## Machine Learning - Naive Bayes - Sentiment analysis over Moroccan Political comments - NLP
+
+<h4>This is an implementation of the Naive bayes _ machine learning algorithm integrated in a markdown document, doing the sentiment analysis job, based on a dataset of 2141 comment annotated as "neg" for Negative and "pos" for postive comments.</h4>
+
+- <b>First of all we load our data set, and change it to data frame so that we can manipulate it easily</b>
+```{r Hespress_sentiment_analysis}
+# loading the training tweets 
+df <- read.csv(file = "data_set.csv", stringsAsFactors = FALSE)
+# get a summary of our data frame
+glimpse(df)
+```
+- <b>now lets have a better visualisation for our data set, so that we can get things much clear</b>
+```{r}
+positive <- length(which(df$class == "pos"))
+negative <- length(which(df$class == "neg"))
+Sentiment <- c("Negative","Positive")
+Count <- c(negative, positive)
+output <- data.frame(Sentiment,Count)
+ggplot(data = output, aes(x = Sentiment, y = Count)) +
+  geom_bar(aes(fill = Sentiment), stat = "identity") +
+  theme(legend.position = "none") +
+  xlab("Sentiment") + ylab("Total Count") + ggtitle("Histogram of positive and negative comments in our dataframe")
+```
+
+- <b>Randomize the dataset</b>
+```{r}
+set.seed(1)
+df <- df[sample(nrow(df)), ]
+df <- df[sample(nrow(df)), ]
+glimpse(df)
+```
+```{r}
+# Convert the 'class' variable from character to factor.
+df$class <- as.factor(df$class)
+```
+
+## Bag of Words Tokenisation
+<b>In this implementation, we represent each word in a document as a token (or feature) and each document as a vector of features. In addition, for simplicity, we disregard word order and focus only on the number of occurrences of each word i.e., we represent each document as a multi-set ‘bag’ of words.</b><br/>
+<b>We first prepare a corpus of all the documents in the dataframe.</b>
+```{r}
+corpus <- Corpus(VectorSource(df$text))
+# Inspect the corpus
+corpus
+inspect(corpus[4:7])
+```
+
+## Data Cleaning
+<b>Next, we clean up the corpus by eliminating numbers, punctuation, white space, and by converting to lower case. In addition, we discard common stop words such as “le”, “la”, “dans”, “sur”, etc. We use the tm_map() function from the ‘tm’ package to this end.</b>
+```{r}
+ #Use dplyr's  %>% (pipe) utility to do this neatly.
+corpus.clean <- corpus %>%
+  tm_map(content_transformer(tolower)) %>% 
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords(kind="fr")) %>%
+  tm_map(stripWhitespace)
+```
+
+## Matrix representation of Bag of Words : The Document Term Matrix
+<b>We represent the bag of words tokens with a document term matrix (DTM). The rows of the DTM correspond to documents in the collection, columns correspond to terms, and its elements are the term frequencies. We use a built-in function from the ‘tm’ package to create the DTM.</b>
+```{r}
+dtm <- DocumentTermMatrix(corpus.clean)
+# Inspect the dtm
+inspect(dtm[50:60, 15:23])
+```
+- <b>Taking a closer look, the histogram below is showing the frequency of occurences of unigrams.</b>
+```{r}
+# Frequency
+freq <- sort(colSums(as.matrix(dtm)), decreasing=TRUE)
+wf <- data.frame(word=names(freq), freq=freq)
+# Plot Histogram
+subset(wf, freq>150)    %>%
+        ggplot(aes(word, freq)) +
+        geom_bar(stat="identity", fill="deepskyblue", colour="blue") +
+        theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Partitioning the Data
+<b>Next, we create 75:25 partitions of the dataframe, corpus and document term matrix for training and testing purposes.</b>
+```{r}
+df.train <- df[1:1713,]
+df.test <- df[1714:2141,]
+
+dtm.train <- dtm[1:1713,]
+dtm.test <- dtm[1714:2141,]
+
+corpus.clean.train <- corpus.clean[1:1713]
+corpus.clean.test <- corpus.clean[1714:2141]
+```
+## Feature Selection
+```{r}
+dim(dtm.train)
+```
+<b>The DTM contains 10742 features but not all of them will be useful for our classification task. We reduce the number of features by ignoring words which appear in less than 5 comments To do this, we use ‘findFreqTerms’ function to indentify the frequent words, we then restrict the DTM to use only the frequent words using the ‘dictionary’ option.</b>
+```{r}
+fivefreq <- findFreqTerms(dtm.train, 5)
+length((fivefreq))
+
+# Use only 5 most frequent words (fivefreq) to build the DTM
+dtm.train.nb <- DocumentTermMatrix(corpus.clean.train, control=list(dictionary = fivefreq))
+dim(dtm.train.nb)
+
+dtm.test.nb <- DocumentTermMatrix(corpus.clean.test, control=list(dictionary = fivefreq))
+dim(dtm.train.nb)
+```
+
+## The Naive Bayes algorithm
+<b>The Naive Bayes text classification algorithm is essentially an application of Bayes theorem (with a strong independence assumption) to documents and classes. For a detailed account of the algorithm, refer to course notes from the Stanford NLP course.</b>
+
+## Boolean feature Multinomial Naive Bayes
+<b>We use a variation of the multinomial Naive Bayes algorithm known as binarized (boolean feature) Naive Bayes due to Dan Jurafsky. In this method, the term frequencies are replaced by Boolean presence/absence features. The logic behind this being that for sentiment classification, word occurrence matters more than word frequency.</b>
+
+```{r}
+# Function to convert the word frequencies to yes (presence) and no (absence) labels
+convert_count <- function(x) {
+  y <- ifelse(x > 0, 1,0)
+  y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))
+  y
+}
+```
+
+```{r}
+# Apply the convert_count function to get final training and testing DTMs
+trainNB <- apply(dtm.train.nb, 2, convert_count)
+testNB <- apply(dtm.test.nb, 2, convert_count)
+```
+
+## Training the Naive Bayes Model
+<b>To train the model we use the naiveBayes function from the ‘e1071’ package. Since Naive Bayes evaluates products of probabilities, we need some way of assigning non-zero probabilities to words which do not occur in the sample. We use Laplace 1 smoothing to this end.</b>
+```{r}
+# Train the classifier
+system.time( classifier <- naiveBayes(trainNB, df.train$class, laplace = 1) )
+```
+
+<b>Testing the Predictions</b>
+```{r}
+# Use the NB classifier we built to make predictions on the test set.
+system.time( pred <- predict(classifier, newdata=testNB) )
+```
+
+```{r}
+# Create a truth table by tabulating the predicted class labels with the actual class labels
+table("Predictions"= pred,  "Actual" = df.test$class );
+```
+
+## Confusion matrix
+```{r}
+# Prepare the confusion matrix
+conf.mat <- confusionMatrix(pred, df.test$class)
+
+conf.mat
+```
+
